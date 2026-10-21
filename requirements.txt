@@ -3,3 +3,5 @@ opencv-python
 pycocotools
 pandas
 matplotlib
+numpy
+ipykernel
