@@ -20,7 +20,8 @@ CLASSES = [0, 2]
 
 FPS = 10 # KITTI frame rate
 
-SEGMENTER_ADDRESS = ("localhost", 6000)
+# On the cluster the segmenter listens on 0.0.0.0; the client reaches it through an SSH tunnel on localhost
+SEGMENTER_ADDRESS = (os.environ.get("SEGMENTER_HOST", "localhost"), int(os.environ.get("SEGMENTER_PORT", 6000)))
 
 
 def merge_per_frame(rows, name):

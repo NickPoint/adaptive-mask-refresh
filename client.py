@@ -1,5 +1,6 @@
 import os
 import pickle
+import secrets
 import subprocess
 import sys
 import time
@@ -12,7 +13,7 @@ import pandas as pd
 import pipeline as p
 
 JPEG_QUALITY = 90
-INTERVAL = 5
+MAX_INTERVAL = 30
 DELAYS = [0.0, 0.15, 0.35, 0.55]  # seconds
 OUT_DIR = "results"
 
@@ -105,23 +106,23 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     frames = p.load_frames(p.DEV_SEQS)
 
+    server = None
+    os.environ.setdefault("SEGMENTER_AUTHKEY", secrets.token_hex(16))
     server = subprocess.Popen([sys.executable, "segmenter.py"], stdout=subprocess.PIPE, text=True)
     try:
-        while (line := server.stdout.readline()).strip() != "ready":
+        while server and (line := server.stdout.readline()).strip() != "ready":
             if not line:
                 raise RuntimeError("segmenter process exited before it was ready")
         runs = []
-        with Client(p.SEGMENTER_ADDRESS) as conn:
-            for method, use_flow in [("hold", False), ("flow", True)]:
-                for delay in DELAYS:
-                    print(f"{method}, delay {delay * 1e3:.0f} ms", flush=True)
-                    for _, seq_frames in frames.groupby("seq"):
-                        run = run_remote(seq_frames, conn, INTERVAL, use_flow, delay)
-                        run.insert(0, "delay_ms", int(delay * 1e3))
-                        run.insert(0, "method", method)
-                        runs.append(run)
+        with Client(p.SEGMENTER_ADDRESS, authkey=os.environ["SEGMENTER_AUTHKEY"].encode()) as conn:
+            for _, seq_frames in frames.groupby("seq"):
+                run = run_remote(seq_frames, conn, INTERVAL, use_flow, delay)
+                run.insert(0, "delay_ms", int(delay * 1e3))
+                run.insert(0, "method", method)
+                runs.append(run)
     finally:
-        server.terminate()
+        if server:
+            server.terminate()
 
     results = pd.concat(runs, ignore_index=True)
     results.to_csv(f"{OUT_DIR}/delay_frames.csv", index=False)
