@@ -1,6 +1,7 @@
 % Draft report in the IEEE conference format (IEEEtran class, CTAN: ctan.org/pkg/ieeetran).
 % Compile with: pdflatex main && bibtex main && pdflatex main && pdflatex main  (or upload the folder to Overleaf)
 % Everything marked TODO in red still needs input or results.
+% Earlier versions: main_before_review.tex, main_before_reference_check.tex, main_before_agent_review.tex.
 \documentclass[conference]{IEEEtran}
 
 \usepackage{graphicx}
@@ -15,7 +16,7 @@
 
 \begin{document}
 
-\title{When to Ask the Server: Adaptive Mask Refresh for Asynchronous Edge--Server Video Segmentation}
+\title{When to Ask the Server: Mask Age and Refresh Policies for Asynchronous Edge--Server Video Segmentation}
 
 \author{\IEEEauthorblockN{Mykyta Voievudskyi}
 \IEEEauthorblockA{\todo{institute, university}\\
@@ -25,35 +26,40 @@
 \maketitle
 
 \begin{abstract}
-A client that sees a video stream but cannot run a segmentation model itself has to ask a server for masks. The answers arrive late and cost bandwidth, so the client segments only some frames and has to keep useful masks in between. We study this setting on the KITTI MOTS development sequences with a YOLO segmentation model on a GPU server and dense optical flow on the client. Optical-flow propagation keeps most of the accuracy when refreshing every 5th frame (IoU 0.84 against 0.90 for segmenting every frame), and the delay of the server hurts only by making the shown masks older. We then let the client decide when to refresh, with a maximum mask age and a trigger based on the residual of the flow-warped previous frame around the mask boundary. On a fast connection the boundary residual gives 0.014 to 0.020 higher IoU than fixed intervals at the same request rate, about 10\,\% fewer requests for the same accuracy, but this effect is of the same size as the variation of the real latency between runs. On a simulated 2\,Mbit/s uplink the residual trigger adds no measurable benefit, while limiting the client to one outstanding request turns the worst fixed policy (IoU 0.45) into the best one (0.63). \todo{update with the controlled rerun and held-out results}
+Cameras on vehicles, robots and phones need to know which pixels belong to which object, but segmentation networks are too heavy to run on such devices at video rate. Offloading to an edge server solves the compute problem but creates two new ones: every request costs uplink bandwidth, and every answer arrives late. The device must therefore segment only some frames remotely and bridge the gaps itself. We study this on driving video from KITTI MOTS, with a YOLO segmentation model on a GPU server and dense optical flow on the client. When only every fifth frame is segmented, moving the last mask with optical flow keeps an IoU of 0.84, against 0.90 for segmenting every frame and 0.62 for holding the last mask. The server's delay costs accuracy only by making the shown mask older, so mask age, the number of frames since the shown mask's source frame, captures the effect of both the refresh interval and the delay. A refresh trigger based on how well the flow explains the image around the mask carries information about mask quality, but is not measurably better than a fixed interval: its advantage of 0.01–0.02 IoU is close to the variation between runs and does not repeat consistently on held-out sequences. On a simulated 2\,Mbit/s uplink a simpler rule matters more: never send a new frame while the previous request is in flight. Sending every fifth frame overloads this link and drops the IoU to 0.45, while this rule reaches 0.63 without knowing the link's bandwidth.
 \end{abstract}
 
 \begin{IEEEkeywords}
-video segmentation, edge computing, computation offloading, optical flow, keyframe scheduling
+edge computing, computation offloading, video segmentation, optical flow, keyframe scheduling, age of information
 \end{IEEEkeywords}
 
 \section{Introduction}
 
-Many devices that observe the world through a camera, such as vehicles, robots or phones, cannot run a modern segmentation network on every frame. A common way out is to send frames to a server with a GPU. This brings two costs. Every request uses uplink bandwidth, and the answer arrives only after the network and the server have done their part, so the mask describes a frame the client has already left behind.
+Many systems that act in the physical world need to know, frame by frame, which pixels belong to which object. A delivery robot has to separate pedestrians from the pavement, a driver assistance system has to follow the outline of the car ahead, and an augmented-reality application has to know where a person stands. Deep neural networks for this task, instance segmentation, are accurate but expensive: keeping up with video needs a GPU, and the devices in question, a phone, a small robot or a cheap sensor box, often have none.
 
-The client can therefore not show a fresh segmentation on every frame. It has to keep a mask between the answers of the server, and it has to decide which frames to send. This report studies both parts on driving video:
+Edge--cloud computing addresses this mismatch~\cite{shi2016edge, satyanarayanan2017edge}. The device sends its data to a server close to it and receives the result. One GPU server can serve many devices, the device stays light, and the model can be updated in one place.
 
+Offloading a video stream frame by frame has three costs. Every frame costs uplink bandwidth: a KITTI frame of $1242\times375$ pixels is about 130\,kB as a JPEG, so sending all ten frames per second needs more than 10\,Mbit/s of upload, more than many mobile connections provide. Every frame also costs server time, so the number of devices a server can support falls with the rate at which each of them sends. And every answer arrives late: even on a fast connection the mask comes back when the camera is already one frame further, and on a slow one it describes a scene several frames old. Yet consecutive frames at ten frames per second are very similar, so segmenting each of them is largely redundant.
+
+A device that wants a mask on every frame must therefore bridge the gap between the server's answers and decide which frames are worth sending. We study both on driving video, in four questions that each build on the answer to the previous one:
 \begin{enumerate}
-\item How much accuracy is lost when segmentation runs only every $N$ frames, and how much of it does optical-flow propagation on the client recover?
-\item How does the server's delay affect this?
-\item Can a rule that uses only information available on the client decide when to refresh better than a fixed interval, at the same number of requests?
-\item How do these policies behave on a slow, limited uplink?
+\item How much accuracy is lost when only every $N$-th frame is segmented, and how much can the device recover cheaply with optical flow?
+\item Once the masks arrive late from a server, how does the delay change this?
+\item If the age of the shown mask predicts most of its accuracy, can the device do better than a fixed schedule by noticing which masks degrade faster than their age suggests?
+\item When the uplink is slow, does the choice of when to send still matter, or is it overtaken by how much the link can carry?
 \end{enumerate}
 
-The contributions are an asynchronous client--server setup with a real GPU server, an evaluation of hold and flow propagation under delay, a residual-based refresh trigger evaluated against fixed intervals at matched request rates, and the observation that on a limited uplink the limit on outstanding requests matters far more than the trigger.
+In a client--server implementation on KITTI MOTS, optical flow recovers most of the accuracy lost by segmenting less often, the server's delay costs accuracy only by making the shown mask older, and a refresh trigger based on how well the flow explains the image is not measurably better than a fixed interval. On a limited uplink, what matters is that the device never sends while a previous request is in flight. We call this the zero-wait condition, after the zero-wait policy of age-of-information theory, which sends a new update as soon as the previous one has been delivered~\cite{sun2016update}.
 
 \section{Related Work}
 
-\textbf{Keyframe propagation in video segmentation.} Running a heavy network only on keyframes and propagating results in between is well established. Deep Feature Flow~\cite{zhu2017dff} propagates network features with optical flow, and Clockwork Convnets~\cite{shelhamer2016clockwork} update parts of a network at different rates. Adaptive keyframe scheduling chooses keyframes from low-level feature changes~\cite{li2018lowlatency} or from a learned estimate of the expected accuracy~\cite{xu2018dvsnet}. These works run on one machine, without network delay and without bandwidth limits.
+\textbf{Keyframes and propagation.} Running an expensive network only on some frames and propagating its output to the others is well established in video recognition. Deep Feature Flow~\cite{zhu2017dff} computes features on keyframes and moves them to the other frames along the optical flow. Clockwork Convnets~\cite{shelhamer2016clockwork} update the layers of a network at different rates, since deeper features change more slowly. Because a fixed keyframe interval wastes computation on static scenes and reacts too slowly to fast ones, later work chooses keyframes adaptively, from the deviation of low-level features~\cite{li2018lowlatency} or from a small network that predicts the accuracy of propagation~\cite{xu2018dvsnet}. These methods run on a single machine: they save computation, but they do not face a network that delays the results and limits how often a keyframe can be requested.
 
-\textbf{Offloading from mobile devices.} Glimpse~\cite{chen2015glimpse} sends frames to a server for recognition only when the scene changes and tracks objects locally in between, which is closest to the setting here. Liu et al.~\cite{liu2019edgear} reduce the latency of edge-assisted detection for augmented reality by parallelising streaming and inference and by tracking on the device. \todo{read and summarise one or two more recent offloading papers}
+\textbf{When to offload.} Mobile systems face the same decision for offloaded recognition. Glimpse~\cite{chen2015glimpse} sends frames to a server when the scene changes enough or its tracking degrades, and tracks the recognised objects on the phone in between. MARLIN~\cite{apicharttrisorn2019marlin} makes the same decision on the device itself: to save energy, it runs a mobile detector only to find new objects or objects whose appearance has changed, and tracks in between. Liu et al.~\cite{liu2019edgear} reduce the end-to-end latency of edge-assisted detection for augmented reality by streaming parts of a frame in parallel and tracking on the device. Later systems adapt the trigger itself: Hanyao et al.~\cite{hanyao2021edge} learn online the threshold on the tracking results that triggers edge detection, Reducto~\cite{li2020reducto} adapts the frame-differencing thresholds applied on the camera because a static threshold misses the accuracy target, Kite~\cite{cong2024kite} adapts offloading decisions to a changing wireless link, and Guo et al.~\cite{guo2025ltedada} learn the choice between local tracking and edge detection, with a fixed interval and a pixel-difference trigger as baselines. These systems target detection or other queries rather than pixel masks. STAC~\cite{xiao2022stac} is closest to our task. It offloads keyframes for semantic segmentation, propagates the results on the device with DIS optical flow, and sends a new keyframe when the last keyframe, warped along the flow, no longer matches the current frame well enough. This trigger is similar in spirit to our boundary residual (Section~\ref{sec:policies}). The main contribution of STAC, however, is compressing the offloaded frames, and it does not study how the trigger interacts with server delay or a limited uplink.
 
-This work combines the two lines in a simple, explainable form: propagation with classical dense optical flow, a refresh rule from the flow residual, and an evaluation that compares policies at equal request rates and includes a limited uplink.
+\textbf{Freshness of information.} The age of information measures how old the newest update available at a receiver is~\cite{yates2021aoi}. Kaul et al.~\cite{kaul2012status} showed that a source that sends updates through a queue too often makes them older, not fresher, because each update waits behind the previous ones. Sun et al.~\cite{sun2016update} studied the zero-wait policy and showed that it maximises throughput but does not always minimise age. The age of a mask in our system is exactly this quantity, and the slow-link results in Section~\ref{sec:slow} are an instance of both findings.
+
+Our system combines these lines in a simple form: propagation with classical dense optical flow, which needs no training and runs on a CPU, and a refresh trigger derived from that flow, compared with other policies at equal request rates.
 
 \section{System}
 
@@ -62,175 +68,216 @@ This work combines the two lines in a simple, explainable form: propagation with
 \begin{tikzpicture}[node distance=0.6cm and 1.2cm, box/.style={draw, rounded corners, align=center, font=\footnotesize, minimum height=0.8cm}, >={Stealth}]
 \node[box] (cam) {camera\\10 fps};
 \node[box, right=of cam] (client) {client: optical flow,\\propagation, policy};
-\node[box, right=of client] (server) {segmenter\\(YOLO, GPU)};
+\node[box, right=of client] (server) {segmenter\\(YOLO26, GPU)};
 \draw[->] (cam) -- (client);
 \draw[->] ([yshift=4pt]client.east) -- node[above, font=\scriptsize] {JPEG} ([yshift=4pt]server.west);
 \draw[->] ([yshift=-4pt]server.west) -- node[below, font=\scriptsize] {mask (RLE)} ([yshift=-4pt]client.east);
 \end{tikzpicture}
-\caption{Setup. The client sends some frames and does not wait; masks arrive later and are moved to the current frame with optical flow.}
+\caption{The client sends some frames to the segmenter without waiting. Masks arrive later and are moved to the current frame with optical flow.}
 \label{fig:system}
 \end{figure}
 
-Fig.~\ref{fig:system} shows the setup. The client replays the frames at the recording rate of 10\,fps. When its policy decides to refresh, it encodes the current frame as JPEG (quality 90, about 137\,KB) and sends it to the segmenter without waiting for the answer. The segmenter runs a pretrained Ultralytics YOLO26m segmentation model~\cite{ultralytics} and returns the union of all \emph{person} and \emph{car} masks, compressed as run-length encoding (about 1\,KB).
+The system has two parts (Fig.~\ref{fig:system}): a client that stands for the device with the camera, and a segmenter that stands for the edge server. They run as separate processes and talk over a network socket, so the delays and message sizes are those of a real network.
 
-\textbf{Propagation.} On every frame the client computes dense backward optical flow from the current to the previous frame with OpenCV DIS~\cite{kroeger2016dis} and moves the shown mask with it. When a mask arrives it describes an older frame, its source frame. The client moves it over all frames since then, using the flows it has already computed, so it never computes flow on old frames again. The alternative, used as a baseline, holds the last mask unchanged.
+The client replays the video at its recording rate of ten frames per second. When it decides to ask for a new mask, it encodes the current frame as a JPEG with quality 90, sends it, and continues with the next frames without waiting for the answer. The segmenter runs the pretrained YOLO26m segmentation model (yolo26m-seg)~\cite{jocher2026yolo26, ultralytics} with its default settings: an input size of 640\,px and a confidence threshold of 0.25. It keeps the masks of the COCO classes person and car, which correspond to the two classes annotated in KITTI MOTS, merges them, and returns them in run-length encoding, about 1\,kB against about 130\,kB for the frame. The traffic is therefore almost entirely upstream, which is also the scarce direction on most mobile connections.
 
-\textbf{Mask age.} The age of the shown mask is the number of frames between its source frame and the current frame. It is the main quantity that links delay and accuracy in the results.
+\textbf{Bridging the gap.} Between two answers the client has to show some mask. Holding the last one is the simplest choice, but in driving video both the objects and the camera move, so a held mask soon covers the wrong pixels. The client therefore computes dense optical flow from each frame back to the previous one and warps the mask along it. We use OpenCV's Dense Inverse Search (DIS)~\cite{kroeger2016dis}, a classical method that runs on a CPU, with its medium preset, and move the mask with nearest-neighbour sampling.
 
-\textbf{Deployment.} \todo{say which runs used which hardware}. The baselines and delay experiments ran the segmenter on the laptop GPU (RTX 4060 Laptop). The policy experiments ran it on an NVIDIA V100 in a SLURM job on a computing cluster, reached through an SSH tunnel, with the client on the laptop. The messages are authenticated with a shared key, because they contain serialised Python objects.
+\textbf{Mask age.} The \emph{age} of a shown mask is the number of frames between its source frame and the frame it is shown on. Both a long refresh interval and a slow server make the shown masks older.
+
+\textbf{Deployment.} The baseline and delay experiments ran both processes on one laptop, with the segmenter on its GPU (NVIDIA RTX 4060 Laptop GPU). For the refresh-policy experiments the segmenter ran on an NVIDIA V100 GPU in a computing cluster, reached from the laptop through an SSH tunnel. Three policy runs shared this GPU at a time, each with its own segmenter process. Section~\ref{sec:fast} discusses how the latency varied between runs.
 
 \section{Refresh Policies}
 \label{sec:policies}
 
-All policies decide on every frame whether to send the current frame. Three are compared.
+On every frame, a refresh policy decides whether to send the current frame to the server. We compare three policies.
 
-\textbf{Fixed interval} sends every $N$-th frame.
+The \emph{fixed interval} $N$ sends every $N$-th frame. It is the schedule of keyframe propagation~\cite{zhu2017dff} and a common baseline in offloading work, used for example by Guo et al.~\cite{guo2025ltedada}. It needs no information at all, so any other rule has to beat it at the same request rate to be worth its complexity.
 
-\textbf{Maximum interval} sends when the shown mask is at least $K$ frames old. It also does not send while a request newer than the shown mask is on its way, at most 2 requests may be outstanding, and two requests are at least 3 frames apart.
+The \emph{maximum-age rule} $K$ sends when the shown mask has reached an age of $K$ frames. Unlike the fixed interval, it counts from the shown mask, so the age of the shown mask stays within $K$ frames plus one round trip, however slow the server is. It also follows the zero-wait condition: it never sends while a request newer than the shown mask is in flight, since that answer will soon replace the mask, so at most one request is in flight at a time. In addition, it keeps at least three frames between two requests. Any adaptive trigger needs these safeguards, since it would otherwise fire on every frame while it waits for an answer.
 
-\textbf{Residual} uses the same rules as the maximum interval with $K=30$, and additionally sends when a residual signal crosses a threshold.
+The \emph{residual policy} is the maximum-age rule with $K=30$ as a safety net, plus a trigger that fires when the propagated mask seems to be going wrong. It is the client-side counterpart of adaptive keyframe selection~\cite{li2018lowlatency, xu2018dvsnet} and of change-based triggers for invoking an expensive recogniser~\cite{chen2015glimpse, apicharttrisorn2019marlin, xiao2022stac}. The question is how the client can notice that a mask goes wrong without knowing the true mask.
 
-\subsection{Residual signals}
+\textbf{The boundary residual.} The client knows how every pixel moved between the last two frames. If this flow is right, warping the previous frame along it should reproduce the current frame. Where it does not, the flow has failed to explain the image, for example because the background behind a moving car has become visible. The mask is moved by the same flow, so it is likely to go wrong in the same places. We therefore warp the previous grayscale frame onto the current one, subtract each frame's mean brightness so that a global change in lighting does not count, and take the absolute difference per pixel, ignoring pixels whose flow points outside the image.
+The \emph{boundary residual} is the mean of this difference, in grey levels on the 0--255 scale, over a band that extends three pixels to either side of the edge of the propagated mask. We look only at the edge because that is where a slightly wrong flow shows: the inside of a mask stays inside, but its outline drifts away from the object. This is the main difference from STAC~\cite{xiao2022stac}, which compares the warped and the current frame over the whole image. The error of a mask builds up over all the frames it has been moved, so the trigger sums the boundary residual over the frames since the mask's source frame and fires when the sum exceeds a threshold. For the frames before the mask arrived, the sum uses the residual measured around the mask shown on those frames.
 
-The residual reuses the flow that the client computes anyway. The previous grayscale frame is warped onto the current frame with the backward flow, the mean brightness of each frame is subtracted, and the residual is the absolute difference per pixel, in gray levels. Pixels whose flow points outside the previous frame are ignored. Where the flow explains the image well the residual is small.
-
-\textbf{Boundary residual.} The mean residual in a band of about 7\,px around the boundary of the propagated mask (dilation minus erosion), summed over the frames since the shown mask's source frame. Errors of a propagated mask occur at its boundary, so this signal should grow as the mask drifts.
-
-\textbf{Tile fraction.} The image is divided into $32\times32$ tiles. The signal is the share of tiles without mask pixels whose mean residual is above 12 gray levels. It is meant to react to new objects, which the boundary signal cannot see.
-
-Raw flow magnitude is not used, because in driving video the camera moves and the flow is large everywhere, even when propagation works well.
+We do not use the magnitude of the flow as a trigger: in driving video the camera moves, so the flow is large almost everywhere even where it explains the image perfectly. We did not test a flow-magnitude or a pixel-difference trigger as a baseline (Section~\ref{sec:discussion}).
 
 \section{Experimental Setup}
 
-\textbf{Data.} KITTI MOTS~\cite{voigtlaender2019mots}, based on KITTI~\cite{geiger2012kitti}, with the standard split. The 12 training sequences (5{,}027 frames) are used for development and the choice of thresholds. The 9 validation sequences are held out for the final evaluation. Only the classes person and car are used, the classes annotated in KITTI MOTS.
+\textbf{Data.} We use KITTI MOTS~\cite{voigtlaender2019mots}, which adds pixel-accurate instance masks of cars and pedestrians to driving sequences of the KITTI benchmark~\cite{geiger2012kitti}. We follow the standard split. The 12 training sequences (5{,}027 frames) serve as \emph{development sequences} for all experiments and design decisions, and the 9 validation sequences (2{,}981 frames) are kept as \emph{held-out sequences} for a final evaluation of the refresh policies (Section~\ref{sec:heldout}).
 
-\textbf{Metric.} The predicted and annotated masks of each frame are combined over all objects. The IoU is the sum of intersections over all frames divided by the sum of unions, with ignore regions excluded, so frames where both masks are empty do not count.
+\textbf{Accuracy.} For each frame we merge the predicted masks into one and the annotated masks into another, and compute their intersection and union, leaving out the regions the annotation marks as ignored. These regions cover unlabelled objects of nearby classes such as vans and buses, and objects too small to annotate~\cite{voigtlaender2019mots}. We report the IoU pooled over a run: the sum of all intersections divided by the sum of all unions. Averaging the IoU of single frames instead would let a frame with one small, distant object weigh as much as a frame full of nearby cars, and it is undefined for frames in which both the prediction and the ground truth are empty. The pooled IoU is dominated by cars: the development sequences contain 18{,}831 car masks against 8{,}073 pedestrian masks~\cite{voigtlaender2019mots}, and cars cover far more pixels.
 
-\textbf{Cost.} The request rate in requests per second. All requests have about the same size, so the upload bandwidth is proportional to it (2.1\,Mbit/s at 2 requests/s).
+\textbf{Cost.} We measure cost as requests per second. All frames are encoded the same way and have about the same size, so the request rate is proportional to the upload bandwidth and to the server load. Policies are compared at the same request rate, since a policy that sends more will almost always be more accurate, unless it overloads the link.
 
-\textbf{Simulated slow network.} A simulated link in the client adds, on top of the real connection, a limited uplink of 2\,Mbit/s where requests queue behind each other, a fixed extra delay of 50\,ms, and a random half-normal extra delay with a standard deviation of 20\,ms and a fixed seed. Each client has its own simulated link, so runs can be done in parallel. The download is not limited.
+\textbf{Offline and live runs.} The baselines (Section~\ref{sec:baselines}) are computed offline, where a segmented frame gets its mask without delay. All other experiments run live, with frames replayed at 10 fps. The client needs about 18\,ms per frame, of which the boundary residual takes about 4\,ms. A live run depends on the latency of the network and the server, so repeating a configuration can give a slightly different result. We ran each configuration once.
 
-\textbf{Real time.} All policy experiments run in real time at 10\,fps, so the client's processing time and the real latency are part of the measurement. The client needs about 18\,ms per frame including about 4\,ms for the residual signals, and no frame took longer than the 100\,ms frame period. \todo{name the laptop CPU}
+\textbf{Slow uplink.} On the connection between laptop and cluster, which we call the \emph{fast connection}, a mask comes back after about one frame. Mobile uplinks are often much slower, so the client can also simulate a slow link in software. Each frame is uploaded at 2\,Mbit/s, which takes about 0.52\,s for a 130\,kB frame, and a frame sent while another is still uploading waits until that upload has finished. Each request also gets a fixed extra delay of 50\,ms and a small random one (half-normal, standard deviation 20\,ms), which stands for the variation of a real network.
 
 \section{Results}
 
-\subsection{Baselines: propagation recovers most of the accuracy}
+\subsection{How much does optical flow recover?}
+\label{sec:baselines}
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figures/baselines_iou_interval.png}
-\caption{IoU against refresh interval, without delay. Optical-flow propagation keeps most of the accuracy that is lost when holding the last mask.}
+\caption{IoU against refresh interval $N$, computed offline without delay. Optical-flow propagation keeps most of the accuracy that holding the last mask loses.}
 \label{fig:baselines}
 \end{figure}
 
-Segmenting every frame gives IoU 0.895, the best this model reaches on the data (Fig.~\ref{fig:baselines}). Holding the last mask loses accuracy fast, to 0.62 at $N=5$ and 0.40 at $N=20$. Flow propagation keeps 0.84 at $N=5$ and 0.66 at $N=20$, so it recovers about 80\,\% of the lost accuracy at $N=5$. Its typical error is a mask smeared over newly exposed background behind moving objects, where the flow has no correct match.
+Segmenting every frame gives an IoU of 0.895, the best this model can do on the data. Holding the last mask loses accuracy fast (Fig.~\ref{fig:baselines}): 0.62 at every fifth frame and 0.40 at every twentieth, because in driving scenes the objects leave their old masks within a few frames. Moving the mask with optical flow keeps 0.84 at every fifth frame and 0.66 at every twentieth, which recovers about four fifths of the accuracy lost by holding at $N=5$ and about half at $N=20$. These offline baselines are a best case for propagation, because each mask is available on the frame it was computed for.
 
-\subsection{Delay acts through the age of the mask}
+\subsection{How does the server's delay change this?}
+\label{sec:delay}
 
-With the client and the segmenter as separate processes and a controlled delay before a mask may be used, every 100\,ms of delay makes the shown masks one frame older on average. At $N=5$ the IoU with flow falls from 0.81 without added delay to 0.68 at 550\,ms, and with holding from 0.53 to 0.37. At equal mask age the IoU with and without delay differs by at most 0.003 for ages 1 to 4, so the delay costs accuracy only through the mask age.
+We sent every fifth frame to the segmenter live and added a controlled delay of 0, 150, 350 or 550\,ms before a mask may be used. Every 100\,ms of delay makes the shown masks one frame older on average, from 3 frames without added delay to 8 frames at 550\,ms, and the IoU with flow falls accordingly, from 0.81 to 0.68. Even without added delay the IoU is 0.81 rather than the offline 0.84, because an answer can be used on the next frame at the earliest, so the freshest mask is always one frame old.
+
+The delay lowers the IoU only by making the masks older. Masks of the same age are as accurate live as offline: for ages 1 to 4, which occur in both, the IoU differs by at most 0.003. The live setup itself, with JPEG compression and asynchronous answers, therefore costs almost no accuracy.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figures/iou_mask_age.png}
-\caption{IoU against mask age with flow propagation, from a run with a maximum mask age of 30 frames, and from the delay experiments.}
+\caption{IoU against mask age with flow propagation.}
 \label{fig:age}
 \end{figure}
 
-Fig.~\ref{fig:age} shows how far propagation carries a mask: from 0.87 at age 1 to 0.65 at age 10, 0.51 at age 20 and 0.36 at age 30.
+To see how far propagation carries a mask, we ran the maximum-age rule with $K=30$, which lets masks grow up to 30 frames old (Fig.~\ref{fig:age}). The IoU falls from 0.87 one frame after the source frame to 0.65 after ten frames and 0.36 after thirty. After ten frames, a propagated mask is still slightly better than a held mask refreshed every fifth frame (0.62), so flow keeps a mask useful for about one second, but not much longer. Any adaptive policy therefore also needs a maximum age.
 
-\subsection{The residual signals carry information beyond the age}
+\subsection{Can the client tell when a mask goes bad?}
+\label{sec:signal}
 
-From the run with a maximum age of 30, Fig.~\ref{fig:signals} compares masks of the same age: for each age, the rank correlation between a signal and the drop in IoU since the mask arrived. For young masks the summed boundary residual ranks the masks well (about 0.5 to 0.6 at ages 2 to 5), which is where a trigger has to decide. It weakens with age. The tile fraction is weaker but steady at about 0.2 to 0.3. Thresholds were then chosen from the distribution of the signals, at values the average mask reaches at ages of about 6, 11 and 17.
+Because age predicts accuracy well, a trigger can only beat a fixed schedule if it tells which masks degrade faster than their age suggests. We tested whether the boundary residual does this, using the $K=30$ run, in which the client logged the summed boundary residual on every frame. For each mask we took the IoU on the first frame it was shown and, on each later frame, how much the IoU had dropped since. For each age separately we then computed the rank correlation between the summed residual and this drop. It is 1 if a higher residual always comes with a larger drop and 0 if the two are unrelated. We left out frames with very small objects (union below 2{,}000 pixels), where the IoU of a single frame is erratic.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figures/signal_rank_corr.png}
-\caption{Rank correlation between each signal and the IoU drop since the mask arrived, computed separately for each mask age.}
+\caption{Rank correlation between each signal and the IoU drop since the mask was first shown, computed separately for each mask age (about 125 masks per age).}
 \label{fig:signals}
 \end{figure}
 
-\subsection{Fast connection: a small gain from the boundary residual}
+The summed boundary residual tells good masks from bad ones of the same age (Fig.~\ref{fig:signals}). Among masks of the same age, those with a higher residual have lost more IoU since they were fresh: the rank correlation is 0.5 to 0.6 for ages 2 to 5, clearly above zero even with only about 125 masks per age. These early ages matter most, because a trigger has to decide early whether to refresh. For older masks the correlation weakens, to about 0.1 at age 30, which is not distinguishable from zero. A likely reason is that by then the band follows a mask edge that has already drifted away from the object.
+
+Most of this correlation comes from differences between masks in the same scene, and only a small part from differences between scenes. The distinction matters because sequences with a high residual tend to have low IoU. A trigger can exploit a mask that degrades faster than others in the same scene by choosing the moment to refresh, but it can exploit a harder scene only by spending more requests there. Computed within each sequence and averaged, the correlation for ages 2 to 5 is about 0.45 to 0.5, against 0.55 when all sequences are pooled.
+
+From the logged residual we chose thresholds of 60, 100 and 150, which the average mask reaches after about 6, 11 and 17 frames, so that the request rates fall within the range of the fixed intervals we compare against.
+
+A second signal, meant to detect new objects entering the scene, is the share of image tiles outside the mask whose mean residual is high. It correlated more weakly (Fig.~\ref{fig:signals}) and, used as a trigger, was less accurate than a fixed interval at the same request rate, so we do not consider it further.
+
+\subsection{Does the boundary residual beat a fixed interval?}
+\label{sec:fast}
 
 \begin{table}[t]
 \centering
-\caption{Fast connection, development sequences. Fixed intervals interpolated at the same request rate (log scale).}
+\caption{Residual policy on the fast connection (development sequences). ``Fixed'' is the IoU of fixed intervals at the same request rate, ``w/o 0011'' the gain without sequence 0011, and ``seq.\ better'' the number of comparable sequences in which the residual policy is better.}
 \label{tab:fast}
-\begin{tabular}{lcccc}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcccccc}
 \toprule
-Policy ($K=30$ plus) & req/s & IoU & fixed, same rate & gain \\
+Threshold & req/s & IoU & fixed & gain & w/o 0011 & seq.\ better \\
 \midrule
-boundary 60 & 1.39 & 0.785 & 0.771 & +0.014 \\
-boundary 100 & 0.84 & 0.721 & 0.701 & +0.019 \\
-boundary 150 & 0.58 & 0.646 & 0.626 & +0.020 \\
-boundary 100 + tiles 0.45 & 0.89 & 0.723 & 0.711 & +0.012 \\
-tiles 0.23 & 0.49 & 0.584 & 0.593 & $-0.009$ \\
-tiles 0.45 & 0.38 & 0.552 & 0.562 & $-0.011$ \\
+60  & 1.39 & 0.785 & 0.771 & +0.014 & +0.015 & 7 of 10 \\
+100 & 0.84 & 0.721 & 0.701 & +0.019 & +0.010 & 7 of 12 \\
+150 & 0.58 & 0.646 & 0.626 & +0.020 & +0.017 & 8 of 11 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-On the fast connection a mask arrives one or two frames after its request (median 95\,ms). Fixed intervals give IoU 0.808, 0.739, 0.597 and 0.550 at 2.0, 1.0, 0.5 and 0.34 requests/s. The maximum-interval rule sends on exactly the same frames as a fixed interval in this setting, so it is not shown separately.
+On the fast connection the residual policy lies 0.014 to 0.020 IoU above fixed intervals at the same request rate (Table~\ref{tab:fast}), but single runs differ by about as much on their own. We ran the fixed intervals $N=5$, 10 and 20 and the three thresholds. On this connection an answer arrives before the next decision, so the maximum-age rule with $K=30$ sends on the same frames as $N=30$ (172 requests each), and we use it as a fourth fixed-interval point. The fixed-interval IoU rises from 0.55 at $N=30$ through 0.60 at $N=20$ and 0.74 at $N=10$ to 0.81 at $N=5$. We interpolate this curve linearly at the request rate of each residual run. Three observations qualify this gain:
+\begin{itemize}
+\item \emph{Latency varied.} Depending on the load of the shared cluster, 14 to 37\,\% of the masks arrived one frame later than the rest, which we estimate changes the IoU of a run by up to 0.01.
+\item \emph{One reference run had a stall.} In the run with $N=20$, two answers in sequence 0011 took 9\,s and 2\,s. Without this sequence the gain is 0.010 to 0.017 (column ``w/o 0011'').
+\item \emph{The gain is not consistent across sequences.} The residual policy is better in 7 of 10, 7 of 12 and 8 of 11 comparable sequences, those in which its request rate lies within the range of the fixed runs. Splits like these would often occur by chance if each policy were equally likely to win a sequence (sign test, $p=0.23$ to $0.77$).
+\end{itemize}
+On the development sequences the residual policy is therefore at best slightly better than a fixed interval. The thresholds were also chosen on these sequences, so Section~\ref{sec:heldout} repeats the comparison on the held-out sequences.
 
-The boundary residual lies above the fixed curve at all three thresholds (Table~\ref{tab:fast}, Fig.~\ref{fig:fast}), by 0.014 to 0.020 IoU, which means fixed intervals need 9 to 13\,\% more requests for the same accuracy. The gain holds in 7 or 8 of the sequences that can be compared, but it is small per sequence. The tile fraction is worse than fixed intervals and mostly spends its requests on one sequence where much of the background is poorly explained by the flow, so it was dropped.
-
-The share of masks used two frames instead of one frame after their request varied between runs from 14 to 37\,\%, depending on the load of the network and the cluster. One extra frame of age costs about 0.03 IoU for a young mask, so this variation is of the same size as the gain. The run with the largest gain had the most late masks, so the variation does not seem to cause the gain, but it makes the result uncertain. \todo{controlled rerun with a fixed delay of 150\,ms: confirm or reject the gain}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{figures/fast_requests_iou.png}
-\caption{IoU against request rate on the fast connection.}
-\label{fig:fast}
-\end{figure}
-
-\subsection{Slow uplink: the limit on outstanding requests matters most}
+\subsection{What happens on a slow uplink?}
+\label{sec:slow}
 
 \begin{table}[t]
 \centering
-\caption{Simulated 2\,Mbit/s uplink with $50\pm20$\,ms extra delay. Boundary runs sum the residual from the mask's source frame.}
+\caption{Policies on the simulated slow uplink (development sequences). ``In flight'': most requests waiting for an answer at once.}
 \label{tab:slow}
-\begin{tabular}{lcccc}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lccccc}
 \toprule
-Policy & req/s & IoU & median latency & max.\ pending \\
+Policy & req/s & IoU & mean age & med.\ latency & in flight \\
 \midrule
-fixed $N=5$ & 2.01 & 0.447 & 1.67\,s & 17 \\
-fixed $N=10$ & 1.01 & 0.607 & 0.70\,s & 2 \\
-fixed $N=20$ & 0.51 & 0.524 & 0.70\,s & 1 \\
-max.\ interval $K=5$ & 1.36 & 0.628 & 0.69\,s & 1 \\
-max.\ interval $K=10$ & 1.01 & 0.607 & 0.70\,s & 1 \\
-max.\ interval $K=20$ & 0.51 & 0.521 & 0.79\,s & 1 \\
-boundary 60 & 1.05 & 0.613 & 0.69\,s & 1 \\
-boundary 100 & 0.75 & 0.573 & 0.71\,s & 1 \\
-boundary 150 & 0.53 & 0.527 & 0.70\,s & 1 \\
+fixed $N=5$ & 2.01 & 0.447 & 26.9 & 1.67\,s & 17 \\
+fixed $N=10$ & 1.01 & 0.607 & 11.9 & 0.70\,s & 2 \\
+fixed $N=20$ & 0.51 & 0.524 & 16.8 & 0.70\,s & 1 \\
+max.-age $K=5$ & 1.36 & 0.628 & 10.7 & 0.69\,s & 1 \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-On the simulated uplink, sending one frame takes about 0.55\,s and a mask is about 7 frames old when it arrives (Table~\ref{tab:slow}, Fig.~\ref{fig:slow}). Sending every 5th frame exceeds the capacity of the link. The requests queue up, the latency grows to more than 8\,s, and the IoU (0.45) falls below that of sending every 20th frame. The maximum-interval rule with $K=5$ wants the same refresh rate, but it does not send while a request is on its way. It therefore sends as soon as the previous answer is back, every 7.4 frames, uses the link exactly as much as it can carry without knowing its rate, and is the best policy (0.63).
-
-The residual policy first sent much less than expected, because the boundary sum started when a mask \emph{arrived} rather than at its source frame, which ignores the 7 frames of drift during the transfer. With the sum from the source frame (the definition in Section~\ref{sec:policies}) it reacts earlier, but at the same request rate it is only 0.002 to 0.004 IoU above the maximum-interval rule and better in at most half of the sequences that can be compared, which is no measurable gain. When a mask is already old on arrival and a refresh cannot come faster than one round trip, there is little room left for choosing a better moment.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figures/slow_requests_iou.png}
-\caption{IoU against request rate on the simulated 2\,Mbit/s uplink. Fixed $N=5$ overloads the link.}
+\caption{IoU against request rate on the simulated 2\,Mbit/s uplink. Sending every fifth frame exceeds what the link can carry.}
 \label{fig:slow}
 \end{figure}
 
-\subsection{Held-out sequences}
+On the simulated slow uplink, uploading one frame takes about half a second, and a mask is about seven frames old when it arrives (Table~\ref{tab:slow}, Fig.~\ref{fig:slow}).
 
-\todo{evaluate the chosen settings on the 9 held-out sequences and report them here}
+Fixed intervals can overload this link. Sending every fifth frame means two requests per second, but the link carries only about 1.9. The requests pile up: up to 17 are in flight at once, answers arrive up to 8\,s late, the mean mask age rises to 27 frames, and the IoU drops to 0.45, below that of sending only every twentieth frame (0.52). On a limited link, asking for more can make the result worse, because every additional request delays all the following ones, as Kaul et al.~\cite{kaul2012status} found for status updates.
 
-\section{Discussion and Limitations}
+The zero-wait condition prevents this overload. The maximum-age rule with $K=5$ reaches an IoU of 0.63, the best of the policies we ran. Since a mask is already older than five frames when it arrives, the rule sends as soon as the previous answer has arrived, on this link every 7.4 frames, and keeps exactly one request in flight. It thus uses the link as fully as the zero-wait condition allows, without knowing its bandwidth. It also sends 35\,\% more requests than fixed $N=10$, so this comparison is not at equal request rate. With $K=10$ and $K=20$ the link never fills, and the rule sends on almost the same frames as $N=10$ and $N=20$ (505 of 507 and all 256 requests identical). The runs with $K=20$ and $N=20$, which send identical requests, differ by 0.003 IoU, a direct measure of the variation between runs on this link.
 
-\todo{revise after the remaining runs}
+The residual policy adds nothing on this link. At the same request rate it is 0.002 to 0.004 IoU above the maximum-age rule, about the same as this run-to-run variation, and it is better in only 5 of 11, 5 of 10 and 2 of 6 comparable sequences. A mask is already seven frames old when it arrives, and the next one cannot come sooner than one round trip later, so there is little freedom left in choosing when to send.
 
-The clearest result is not about the trigger. Flow propagation and a rule that keeps only one request in flight already give most of what a client can do, and on a limited uplink the second matters more than any choice of moment. The residual trigger is cheap (about 4\,ms per frame) and gives a small, uncertain gain on a fast connection.
+\subsection{Do the results hold on held-out sequences?}
+\label{sec:heldout}
 
-The study has several limitations. Thresholds were tuned and compared on the same development sequences, and the held-out evaluation is still missing. Each setting was run once, and on the fast connection the real latency varied between runs. The slow network is simulated in the client and does not model a variable bandwidth, packet loss or a shared downlink. The masks of all objects are merged into one, so the evaluation does not see which objects are missed. Finally, frame selection was kept simple: the policy always sends the newest frame.
+\begin{table}[t]
+\centering
+\caption{Residual policy on the held-out sequences. ``Ref.'' is the IoU of the reference policy at the same request rate, and ``dev'' is the gain on the development sequences.}
+\label{tab:heldout}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcccccc}
+\toprule
+Threshold & req/s & IoU & ref. & gain & dev & seq.\ better \\
+\midrule
+\multicolumn{7}{l}{\emph{Fast connection, against fixed intervals}} \\
+60  & 1.51 & 0.768 & 0.743 & +0.025 & +0.014 & 7 of 9 \\
+100 & 0.91 & 0.683 & 0.679 & +0.004 & +0.019 & 4 of 9 \\
+150 & 0.61 & 0.611 & 0.608 & +0.003 & +0.020 & 7 of 9 \\
+\midrule
+\multicolumn{7}{l}{\emph{Slow uplink, against the maximum-age rule}} \\
+60  & 1.06 & 0.526 & 0.533 & $-$0.007 & +0.004 & 3 of 9 \\
+100 & 0.76 & 0.498 & 0.499 & 0.000 & +0.004 & 3 of 8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We ran the same settings once on the 9 held-out sequences, which played no part in choosing the thresholds. On the fast connection we ran the fixed intervals $N=5$ to 30 and all three thresholds, since none was clearly best on the development sequences. On the slow uplink we ran the fixed intervals $N=5$, 10 and 20, the maximum-age rule with $K=5$, and thresholds 60 and 100. For the other points of the maximum-age curve we use the fixed runs $N=10$ and 20, which sent on the same frames as $K=10$ and 20 on the development sequences. The latency was nearly the same in all held-out runs: only 3 to 8\,\% of the masks were used one frame late, and no answer on the fast connection took longer than 0.53\,s. Latency differences between runs therefore matter less here than on the development sequences.
+
+\textbf{Fast connection.} The gain over fixed intervals does not repeat consistently. The residual policy is again above the fixed-interval curve (Table~\ref{tab:heldout}), but clearly only at threshold 60 (+0.025, better in 7 of 9 sequences). Thresholds 100 and 150 are only 0.003 to 0.004 above it, and on the development sequences threshold 60 had the smallest gain. A useful signal would give a gain at every threshold and on both sets of sequences. The linear interpolation also slightly favours the residual policy: the fixed-interval curve flattens as the request rate grows, so it lies a little above straight lines between the measured points, and a curved fit shrinks the held-out gains by 0.002 to 0.005. Over the development and held-out sequences, the residual policy is thus between 0 and about 0.02 IoU above a fixed interval at the same request rate, with no threshold that is consistently better. We read this as no measurable gain, and also no loss.
+
+\textbf{Slow uplink.} The results on the slow uplink hold. Sending every fifth frame overloads the link even more than on the development sequences, because the held-out frames are larger (145\,kB on average) and the link carries only about 1.7 of them per second: up to 36 requests are in flight, answers arrive up to 18\,s late, and the IoU falls to 0.26. The maximum-age rule with $K=5$ is again the best policy we ran, with an IoU of 0.548 at one request every 8 frames, against 0.529 for $N=10$. At the same request rate, the residual policy is no better than the maximum-age rule ($-0.007$ and $0.000$).
+
+\section{Discussion}
+\label{sec:discussion}
+
+The experiments point to a clear order of what matters for a device that offloads segmentation. Propagating the mask with optical flow instead of holding it matters most. Next comes the pacing of requests: since the delay acts through mask age, whatever keeps the masks young helps, and on a limited uplink the zero-wait condition prevents the collapse of a fixed schedule that sends too often. Choosing the exact moment to refresh comes last. The boundary residual does tell which masks degrade faster, but this did not turn into a measurable gain at equal request rate. A likely reason is that age already predicts mask quality well, and the trigger can only shift a fixed number of requests between masks, within the limits set by the minimum spacing and the maximum age.
+
+Mask age also makes the slow-link results predictable. With a latency of about seven frames, the mean age of a schedule that sends every $I$ frames is close to $7 + (I-1)/2$ frames, which reproduces the three non-overloaded rows of Table~\ref{tab:slow} within half a frame. By this estimate, a fixed interval of seven frames would give masks about as young as the maximum-age rule with $K=5$. The zero-wait condition also leaves room for improvement. Under it, the uplink is idle while the server segments the frame and the mask travels back, about a quarter of every round trip on our link. A client that sends the next frame as soon as the previous upload has finished would keep the link busy without building a queue and, by the same estimate, make the masks about one frame younger.
+
+\textbf{Limitations.} Each configuration was run once, on 12 development and 9 held-out sequences, so differences of about 0.01 IoU between policies cannot be resolved. The slow uplink is a simulation with constant bandwidth, while the main practical advantage of the zero-wait condition, that it needs no knowledge of the bandwidth, would show best on a link whose bandwidth changes.
+
+\textbf{Next steps.} Because the delay acts only through mask age, most further experiments can be run offline: the segmenter is run once on every frame, and each policy is replayed against recorded latencies. Such a replay compares all policies on the same latencies, gives confidence intervals from many repetitions, and makes it cheap to test the two predictions above, a cheaper pixel-difference trigger of the kind used by Glimpse~\cite{chen2015glimpse} or a flow-magnitude trigger, and recorded cellular link traces. Evaluating each object separately instead of one merged mask would also show whether a trigger helps with newly appearing pedestrians, where it might matter most.
 
 \section{Conclusion}
 
-Optical-flow propagation lets a client segment only every 5th frame and keep IoU 0.84 instead of 0.90, and the delay of a remote server costs accuracy only by making masks older. A refresh trigger from the flow residual around the mask boundary gives a small gain over fixed intervals on a fast connection, which still has to be confirmed under controlled latency and on held-out data. On a slow uplink it adds nothing measurable, while a limit of one outstanding request turns the worst fixed policy into the best one. \todo{final numbers}
+Offloading segmentation from a camera device to an edge server is practical if the device segments only some frames and bridges the gaps with optical flow. Segmenting every fifth frame keeps an IoU of 0.84 offline, or 0.81 with a live asynchronous server, against 0.90 for segmenting every frame. Mask age explains the effect of both the refresh interval and the server's delay, and a propagated mask stays useful for about one second. The boundary residual carries information about mask quality, but the residual policy was not measurably better than a fixed interval at the same request rate, on either the development or the held-out sequences. On a slow uplink the decisive choice is how often to send, and the zero-wait condition, never sending while a request is in flight, gets it right without knowing the bandwidth. This also held on the held-out sequences, where the maximum-age rule reached an IoU of 0.55 while sending every fifth frame collapsed to 0.26.
+
+\section*{Acknowledgment}
+
+We thank \todo{supervisor's name} for proposing the idea of this work, suggesting the refresh policies we compare, and providing the reading material it builds on.
 
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
